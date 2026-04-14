@@ -306,6 +306,7 @@ func (o FilterCollector) filterOperator(ctx context.Context, op v2alpha1.Operato
 	filteredImageDigest, err := os.ReadFile(filepath.Join(filteredCatalogsDir, filterDigest, "digest"))
 	if err != nil {
 		// If there was an error reading the digest file, we assume the catalog has not been filtered
+		o.Log.Debug("Error reading digest file: %s: %w. Possibly missing from archive?", filepath.Join(filteredCatalogsDir, filterDigest, "digest"), err)
 		isAlreadyFiltered = false
 	} else {
 		// digest read
