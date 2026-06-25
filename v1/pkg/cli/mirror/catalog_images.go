@@ -27,6 +27,7 @@ import (
 	"github.com/otiai10/copy"
 	"k8s.io/klog/v2"
 
+	"github.com/openshift/oc-mirror/internal/pkg/fileutil"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/config"
 	"github.com/openshift/oc-mirror/pkg/image"
@@ -34,11 +35,14 @@ import (
 )
 
 const (
-	opmCachePrefix  = "/tmp/cache"
 	opmBinarySuffix = "opm"
 	cacheFolderUID  = 1001
 	cacheFolderGID  = 0
-	tempFolder      = "/tmp/temp_folder"
+)
+
+var (
+	opmCachePrefix = filepath.Join(os.TempDir(), "cache")
+	tempFolder     = filepath.Join(os.TempDir(), "temp_folder")
 )
 
 type NoCacheArgsErrorType struct{}
@@ -747,7 +751,7 @@ func extractCatalog(img v1.Image, destFolder string, opmBin string) error {
 				}
 			}
 		}
-		err = os.Symlink(targetAbsPath, linkAbsPath)
+		err = fileutil.CreateSymlink(targetAbsPath, linkAbsPath)
 		if err != nil { // For `opmBin` = `/bin/opm`,
 			// only return the error if the symlink contains `/bin` or `/opm`
 			for _, pathComp := range opmBinPathComponents {

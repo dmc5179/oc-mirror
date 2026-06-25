@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/template"
 	"time"
 
@@ -196,8 +195,10 @@ func NewMirrorCmd(log clog.PluggableLoggerInterface) *cobra.Command {
 		SilenceUsage:  false,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// OCPBUGS-55374 (check current umask)
-			currentUmask := syscall.Umask(0)
-			syscall.Umask(currentUmask)
+			currentUmask, err := checkUmask()
+			if err != nil {
+				return err
+			}
 			if currentUmask != 0o022 {
 				log.Warn(emoji.Warning+"  Detected bad umask 00%o (oc-mirror requires a umask of 0022)", currentUmask)
 			}

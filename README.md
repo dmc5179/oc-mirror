@@ -71,6 +71,19 @@ make tidy
 make build
 ```
 
+### Building Windows Binaries
+
+```console
+make cross-build-windows-amd64
+make cross-build-windows-arm64
+```
+
+### Building all targets (including Windows)
+
+```console
+make cross-build
+```
+
 After performing the steps above a new file (`oc-mirror`) will appear in the `bin/` folder.
 
 NOTE: it is possible to use oc-mirror as a plugin of Openshift Client (oc) by placing the oc-mirror binary in a directory specified in $PATH.

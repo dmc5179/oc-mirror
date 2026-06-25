@@ -78,7 +78,11 @@ clean:
 
 build:
 	make -C v1 build
-	@cp v1/$(GO_BUILD_BINDIR)/oc-mirror ./cmd/oc-mirror/data/oc-mirror-v1
+	@if [ "$(GOOS)" = "windows" ]; then \
+		cp v1/$(GO_BUILD_BINDIR)/oc-mirror.exe ./cmd/oc-mirror/data/oc-mirror-v1; \
+	else \
+		cp v1/$(GO_BUILD_BINDIR)/oc-mirror ./cmd/oc-mirror/data/oc-mirror-v1; \
+	fi
 	mkdir -p $(GO_BUILD_BINDIR)
 	go build $(GO_MOD_FLAGS) $(GO_BUILD_FLAGS) $(GO_LD_FLAGS) -o $(GO_BUILD_BINDIR) ./...
 .PHONY: build
@@ -99,5 +103,13 @@ cross-build-linux-arm64:
 	+@CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=arm64 $(MAKE) --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/linux-arm64
 .PHONY: cross-build-linux-arm64
 
-cross-build: cross-build-linux-amd64 cross-build-linux-ppc64le cross-build-linux-s390x cross-build-linux-arm64
+cross-build-windows-amd64:
+	+@CGO_ENABLED=$(CGO_ENABLED) GOOS=windows GOARCH=amd64 $(MAKE) --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/windows-amd64
+.PHONY: cross-build-windows-amd64
+
+cross-build-windows-arm64:
+	+@CGO_ENABLED=$(CGO_ENABLED) GOOS=windows GOARCH=arm64 $(MAKE) --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/windows-arm64
+.PHONY: cross-build-windows-arm64
+
+cross-build: cross-build-linux-amd64 cross-build-linux-ppc64le cross-build-linux-s390x cross-build-linux-arm64 cross-build-windows-amd64 cross-build-windows-arm64
 .PHONY: cross-build

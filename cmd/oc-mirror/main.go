@@ -93,7 +93,7 @@ func runOcMirrorV1(args []string) error {
 	if err != nil && strings.Contains(err.Error(), "permission denied") {
 		tmpdir, ok := os.LookupEnv("TMPDIR")
 		if !ok {
-			tmpdir = "/tmp"
+			tmpdir = os.TempDir()
 		}
 		klog.Errorf("The tmp dir %q might be mounted as `noexec`. Please set TMPDIR to a filesystem with exec permissions.", tmpdir)
 	}

@@ -24,6 +24,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+
+	"github.com/openshift/oc-mirror/internal/pkg/fileutil"
 )
 
 // WriteTestImage will use go-containerregistry to push a test image to
@@ -217,7 +219,7 @@ func LocalMirrorFromFiles(source string, destination string) error {
 				return err
 			}
 			id := filepath.Base(dst)
-			if err := os.Symlink(id, filepath.Join(destination, relPath)); err != nil {
+			if err := fileutil.CreateSymlink(id, filepath.Join(destination, relPath)); err != nil {
 				return err
 			}
 		case m.IsDir():

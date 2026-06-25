@@ -17,6 +17,7 @@ import (
 	"github.com/openshift/oc/pkg/cli/image/imagesource"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
+	"github.com/openshift/oc-mirror/internal/pkg/fileutil"
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/config"
 )
@@ -135,7 +136,7 @@ func associateLocalImageLayers(image, localRoot, dirRef, tagOrID, defaultTag str
 			tag = defaultTag + partial
 			manifestDir := filepath.Dir(manifestPath)
 			symlink := filepath.Join(manifestDir, tag)
-			if err := os.Symlink(info.Name(), symlink); err != nil {
+			if err := fileutil.CreateSymlink(info.Name(), symlink); err != nil {
 				return nil, err
 			}
 		}

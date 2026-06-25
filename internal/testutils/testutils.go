@@ -18,6 +18,8 @@ import (
 
 	"github.com/distribution/distribution/v3/manifest"
 	"github.com/google/go-containerregistry/pkg/crane"
+
+	"github.com/openshift/oc-mirror/v2/internal/pkg/fileutil"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -92,7 +94,7 @@ func LocalMirrorFromFiles(source string, destination string) error {
 				return err
 			}
 			id := filepath.Base(dst)
-			if err := os.Symlink(id, filepath.Join(destination, relPath)); err != nil {
+			if err := fileutil.CreateSymlink(id, filepath.Join(destination, relPath)); err != nil {
 				return err
 			}
 		case m.IsDir():

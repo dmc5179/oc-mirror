@@ -935,7 +935,7 @@ func (o *MirrorOptions) processNestedPaths(ref *image.TypedImage) imagesource.Ty
 
 // removeTmpDirs - utility function to delete left over temporary files
 func removeTmpDirs() {
-	const directory string = "/tmp/"
+	directory := os.TempDir()
 	toDelete := []string{"render-unpack-*", "imageset-catalog-*"}
 
 	for _, x := range toDelete {
