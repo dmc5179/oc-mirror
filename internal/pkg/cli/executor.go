@@ -28,6 +28,7 @@ import (
 	"github.com/distribution/distribution/v3/configuration"
 	"github.com/distribution/distribution/v3/registry"
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/filesystem"
+	_ "github.com/distribution/distribution/v3/registry/storage/driver/s3-aws"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -119,6 +120,12 @@ oc-mirror delete --delete-yaml-file /home/<user>/oc-mirror/delete1/working-dir/d
 `
 )
 
+var (
+	errWrongWorkingDirProtocol error = fmt.Errorf("when --workspace is used, it must have file:// prefix")
+	errConflictingCacheValues        = fmt.Errorf("either OC_MIRROR_CACHE or --cache-dir can be used but not both")
+	errInvalidLogLevel               = fmt.Errorf("invalid log-level, it should be one of (info,debug,trace,error)")
+)
+
 type ExecutorSchema struct {
 	Log                  clog.PluggableLoggerInterface
 	LogsDir              string
@@ -195,45 +202,7 @@ func NewMirrorCmd(log clog.PluggableLoggerInterface) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  false,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// OCPBUGS-55374 (check current umask)
-			currentUmask := syscall.Umask(0)
-			syscall.Umask(currentUmask)
-			if currentUmask != 0o022 {
-				log.Warn(emoji.Warning+"  Detected bad umask 00%o (oc-mirror requires a umask of 0022)", currentUmask)
-			}
-
-			log.Info(emoji.WavingHandSign + " Hello, welcome to oc-mirror")
-			log.Info(emoji.Gear + "  setting up the environment for you...")
-
-			// Validate and set common flags
-			if len(opts.Global.WorkingDir) > 0 && !strings.Contains(opts.Global.WorkingDir, consts.FileProtocol) {
-				return fmt.Errorf("when --workspace is used, it must have file:// prefix")
-			}
-			if !slices.Contains([]string{"info", "debug", "trace", "error"}, opts.Global.LogLevel) {
-				return fmt.Errorf("log-level has an invalid value %s , it should be one of (info,debug,trace, error)", opts.Global.LogLevel)
-			}
-			// override log level
-			ex.Log.Level(ex.Opts.Global.LogLevel)
-
-			if os.Getenv(cacheEnvVar) != "" && opts.Global.CacheDir != "" {
-				return fmt.Errorf("either OC_MIRROR_CACHE or --cache-dir can be used but not both")
-			}
-
-			if opts.Global.CacheDir == "" {
-				// Default to the env var to keep previous behavior
-				opts.Global.CacheDir = os.Getenv(cacheEnvVar)
-			}
-			if opts.Global.CacheDir == "" {
-				homeDir, err := os.UserHomeDir()
-				if err != nil {
-					return fmt.Errorf("failed to setup default cache directory: %w", err)
-				}
-				// ensure cache dir exists
-				opts.Global.CacheDir = homeDir
-			}
-
-			log.Info(emoji.Gear+"  environment version: %s", version.Get().GitVersion)
-			return nil
+			return ex.setupEnvironment()
 		},
 		PreRun: func(cmd *cobra.Command, args []string) {
 			opts.Function = string(mirror.CopyMode)
@@ -288,6 +257,11 @@ func NewMirrorCmd(log clog.PluggableLoggerInterface) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.Global.MemProf, "mem-prof", false, "Enable Memory profiling")
 	cmd.PersistentFlags().StringVar(&opts.Global.RegistriesDirPath, "registries.d", "", "use registry configuration files in `DIR` (e.g. for container signature storage)")
 	cmd.PersistentFlags().StringVar(&opts.Global.PolicyPath, "policy", "", "Path to a trust policy file")
+	cmd.PersistentFlags().StringVar(&opts.Global.S3Bucket, "s3-bucket", "", "S3 bucket name for oc-mirror cache storage (enables S3 backend)")
+	cmd.PersistentFlags().StringVar(&opts.Global.S3Region, "s3-region", "", "AWS region for the S3 bucket")
+	cmd.PersistentFlags().StringVar(&opts.Global.S3AccessKey, "s3-access-key", "", "S3 access key ID")
+	cmd.PersistentFlags().StringVar(&opts.Global.S3SecretKey, "s3-secret-key", "", "S3 secret access key")
+	cmd.PersistentFlags().StringVar(&opts.Global.S3Endpoint, "s3-endpoint", "", "Custom S3 endpoint URL (for non-AWS S3 like MinIO)")
 	cmd.PersistentFlags().AddFlagSet(&flagSharedOpts)
 	cmd.PersistentFlags().AddFlagSet(&flagRetryOpts)
 	cmd.PersistentFlags().AddFlagSet(&flagDepTLS)
@@ -296,6 +270,7 @@ func NewMirrorCmd(log clog.PluggableLoggerInterface) *cobra.Command {
 	// copy-only options
 	cmd.Flags().StringVar(&opts.Global.From, "from", "", "Local storage directory for disk to mirror workflow")
 	cmd.Flags().BoolVarP(&opts.IsDryRun, "dry-run", "", false, "Print actions without mirroring images")
+	cmd.Flags().BoolVar(&opts.IsDryRunManifestLists, "dry-run-manifest-lists", false, "Like --dry-run, but also includes manifest list sub-digests in mapping.txt (implies --dry-run, cannot be combined with --dry-run)")
 	cmd.Flags().BoolVarP(&opts.Global.Quiet, "quiet", "q", false, "Enable detailed logging when copying images")
 	cmd.Flags().BoolVarP(&opts.Global.Force, "force", "f", false, "Force the copy and mirror functionality")
 	cmd.Flags().StringVar(&opts.Global.SinceString, "since", "", "Include all new content since specified date (format yyyy-MM-dd). When not provided, new content since previous mirroring is mirrored")
@@ -349,6 +324,48 @@ func HideFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().MarkHidden("ignore-release-signature")
 }
 
+func (o *ExecutorSchema) setupEnvironment() error {
+	o.Log.Info(emoji.WavingHandSign + " Hello, welcome to oc-mirror")
+
+	// OCPBUGS-55374 (check current umask)
+	currentUmask := syscall.Umask(0)
+	syscall.Umask(currentUmask)
+	if currentUmask != 0o022 {
+		o.Log.Warn(emoji.Warning+"  Detected bad umask 00%o (oc-mirror requires a umask of 0022)", currentUmask)
+	}
+
+	// Validate and set common flags
+	if len(o.Opts.Global.WorkingDir) > 0 && !strings.HasPrefix(o.Opts.Global.WorkingDir, consts.FileProtocol) {
+		return errWrongWorkingDirProtocol
+	}
+
+	if !slices.Contains([]string{"info", "debug", "trace", "error"}, o.Opts.Global.LogLevel) {
+		return fmt.Errorf("%q: %w", o.Opts.Global.LogLevel, errInvalidLogLevel)
+	}
+	// override log level
+	o.Log.Level(o.Opts.Global.LogLevel)
+
+	if os.Getenv(cacheEnvVar) != "" && o.Opts.Global.CacheDir != "" {
+		return errConflictingCacheValues
+	}
+
+	if o.Opts.Global.CacheDir == "" {
+		// Default to the env var to keep previous behavior
+		o.Opts.Global.CacheDir = os.Getenv(cacheEnvVar)
+	}
+	if o.Opts.Global.CacheDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to setup default cache directory: %w", err)
+		}
+		// ensure cache dir exists
+		o.Opts.Global.CacheDir = homeDir
+	}
+
+	o.Log.Info(emoji.Gear+"  environment version: %s", version.Get().GitVersion)
+	return nil
+}
+
 // Validate - cobra validation
 func (o ExecutorSchema) Validate(dest []string) error {
 	keyWords := []string{
@@ -395,12 +412,31 @@ func (o ExecutorSchema) Validate(dest []string) error {
 			return fmt.Errorf("--since flag needs to be in format yyyy-MM-dd")
 		}
 	}
+	if o.Opts.IsDryRunManifestLists && o.Opts.IsDryRun {
+		return fmt.Errorf("--dry-run and --dry-run-manifest-lists cannot be used together")
+	}
+	if o.Opts.IsDryRunManifestLists {
+		o.Opts.IsDryRun = true
+	}
 	// OCPBUGS-58467
 	if o.Opts.ParallelImages > 10 || o.Opts.ParallelImages < 1 {
 		return fmt.Errorf("the flag parallel-images must be between the range 1 to 10")
 	}
 	if o.Opts.ParallelLayerImages > 10 || o.Opts.ParallelLayerImages < 1 {
 		return fmt.Errorf("the flag parallel-layers must be between the range 1 to 10")
+	}
+	if o.Opts.Global.IsS3Storage() {
+		if o.Opts.Global.S3AccessKey == "" || o.Opts.Global.S3SecretKey == "" {
+			return fmt.Errorf("when --s3-bucket is set, --s3-access-key and --s3-secret-key are required")
+		}
+		if o.Opts.Global.S3Region == "" && o.Opts.Global.S3Endpoint == "" {
+			return fmt.Errorf("when --s3-bucket is set, either --s3-region or --s3-endpoint (or both) must be provided")
+		}
+		if strings.Contains(dest[0], consts.FileProtocol) {
+			return fmt.Errorf("S3 storage backend is not compatible with the mirrorToDisk workflow (file:// destination)")
+		}
+	} else if o.Opts.Global.S3AccessKey != "" || o.Opts.Global.S3SecretKey != "" || o.Opts.Global.S3Region != "" || o.Opts.Global.S3Endpoint != "" {
+		return fmt.Errorf("--s3-bucket is required when using any S3 storage flags (--s3-access-key, --s3-secret-key, --s3-region, --s3-endpoint)")
 	}
 	if strings.Contains(dest[0], consts.FileProtocol) && o.Opts.Global.WorkingDir != "" {
 		return fmt.Errorf("when destination is file://, mirrorToDisk workflow is assumed, and the --workspace argument is not needed")
@@ -571,6 +607,14 @@ func (o *ExecutorSchema) Complete(args []string) error {
 
 	client, _ := release.NewOCPClient(uuid.New(), o.Log)
 
+	// OCPBUGS-81712: Pin all operator catalogs to digest before initializing collectors
+	// This prevents race conditions in M2D/M2M where catalog tags might change during execution
+	// Best-effort approach: failures are logged as warnings, invalid catalogs handled during collection
+	if len(o.Config.Mirror.Operators) > 0 && (o.Opts.IsMirrorToDisk() || o.Opts.IsMirrorToMirror()) {
+		o.Log.Debug("Resolving operator catalog digests for %d operators", len(o.Config.Mirror.Operators))
+		o.Config = config.PinCatalogDigests(context.Background(), o.Config, o.Manifest, o.Opts, o.Log)
+	}
+
 	o.ImageBuilder = imagebuilder.NewBuilder(o.Log, *o.Opts)
 	o.CatalogBuilder = imagebuilder.NewGCRCatalogBuilder(o.Log, *o.Opts)
 	signature := release.NewSignatureClient(o.Log, o.Config, *o.Opts)
@@ -626,9 +670,37 @@ func (o *ExecutorSchema) Run(cmd *cobra.Command, args []string) error {
 // setupLocalRegistryConfig - private function to parse registry config
 // used in both localregistry serve and localregistry garbage-collect (for delete)
 func (o *ExecutorSchema) setupLocalRegistryConfig() (*configuration.Configuration, error) {
-	// create config file for local registry
-	// sonarqube scanner variable declaration convention
-	configYamlV01 := `
+	var configYaml string
+
+	if o.Opts.Global.IsS3Storage() {
+		configYaml = `
+version: 0.1
+log:
+  accesslog:
+    disabled: {{ .LogAccessOff }}
+  level: {{ .LogLevel }}
+  formatter: text
+  fields:
+    service: registry
+storage:
+  delete:
+    enabled: true
+  cache:
+    blobdescriptor: inmemory
+  s3:
+    accesskey: {{ .S3AccessKey }}
+    secretkey: {{ .S3SecretKey }}
+    region: {{ .S3Region }}
+    bucket: {{ .S3Bucket }}
+    regionendpoint: {{ .S3Endpoint }}
+    forcepathstyle: true
+http:
+  addr: :{{ .LocalStoragePort }}
+  headers:
+    X-Content-Type-Options: [nosniff]
+`
+	} else {
+		configYaml = `
 version: 0.1
 log:
   accesslog:
@@ -648,11 +720,8 @@ http:
   addr: :{{ .LocalStoragePort }}
   headers:
     X-Content-Type-Options: [nosniff]
-      #auth:
-      #htpasswd:
-      #realm: basic-realm
-      #path: /etc/registry
 `
+	}
 
 	var buff bytes.Buffer
 	type RegistryConfig struct {
@@ -660,6 +729,11 @@ http:
 		LocalStoragePort int
 		LogLevel         string
 		LogAccessOff     bool
+		S3AccessKey      string
+		S3SecretKey      string
+		S3Region         string
+		S3Bucket         string
+		S3Endpoint       string
 	}
 
 	rc := RegistryConfig{
@@ -667,6 +741,11 @@ http:
 		LocalStoragePort: int(o.Opts.Global.Port),
 		LogLevel:         o.Opts.Global.LogLevel,
 		LogAccessOff:     true,
+		S3AccessKey:      o.Opts.Global.S3AccessKey,
+		S3SecretKey:      o.Opts.Global.S3SecretKey,
+		S3Region:         o.Opts.Global.S3Region,
+		S3Bucket:         o.Opts.Global.S3Bucket,
+		S3Endpoint:       o.Opts.Global.S3Endpoint,
 	}
 
 	if o.Opts.Global.LogLevel == "debug" || o.Opts.Global.LogLevel == "trace" {
@@ -674,7 +753,7 @@ http:
 		rc.LogAccessOff = false
 	}
 
-	t := template.Must(template.New("local-storage-config").Parse(configYamlV01))
+	t := template.Must(template.New("local-storage-config").Parse(configYaml))
 	err := t.Execute(&buff, rc)
 	if err != nil {
 		return &configuration.Configuration{}, fmt.Errorf("error parsing the config template %v", err)
@@ -763,6 +842,10 @@ func (o *ExecutorSchema) isLocalStoragePortBound() bool {
 // setupLocalStorageDir - private utility to setup
 // the correct local storage directory
 func (o *ExecutorSchema) setupLocalStorageDir() error {
+	if o.Opts.Global.IsS3Storage() {
+		o.LocalStorageDisk = ""
+		return nil
+	}
 	o.LocalStorageDisk = filepath.Join(o.Opts.Global.CacheDir, cacheRelativePath)
 	err := os.MkdirAll(o.LocalStorageDisk, 0o755)
 	if err != nil {
@@ -895,7 +978,13 @@ func (o *ExecutorSchema) RunMirrorToDisk(cmd *cobra.Command, args []string) erro
 		return batchError
 	}
 
-	o.createConfigsWithPinnedCatalogs(collectorSchema)
+	o.createConfigsWithPinnedCatalogs()
+
+	if err := version.WriteVersionMetadata(o.Opts.Global.WorkingDir, version.Get()); err != nil {
+		o.Log.Warn("unable to write oc-mirror version metadata: %v", err)
+	} else {
+		o.Log.Debug("wrote version metadata: %s", version.Get().GitVersion)
+	}
 
 	o.Log.Info(emoji.Package + " Preparing the tarball archive...")
 	return o.MirrorArchiver.BuildArchive(cmd.Context(), copiedSchema.AllImages)
@@ -943,41 +1032,10 @@ func (o *ExecutorSchema) RunMirrorToMirror(cmd *cobra.Command, args []string) er
 	// NOTE: we will check for batch errors at the end
 	copiedSchema, batchError := o.Batch.Worker(cmd.Context(), collectorSchema, *o.Opts)
 
-	o.createConfigsWithPinnedCatalogs(collectorSchema)
+	o.createConfigsWithPinnedCatalogs()
 
-	// create IDMS/ITMS
-	forceRepositoryScope := o.Opts.Global.MaxNestedPaths > 0
-	if err := o.ClusterResources.IDMS_ITMSGenerator(copiedSchema.AllImages, forceRepositoryScope); err != nil {
+	if err := o.generateClusterResources(cmd.Context(), copiedSchema.AllImages); err != nil {
 		return err
-	}
-
-	if err := o.ClusterResources.CatalogSourceGenerator(copiedSchema.AllImages); err != nil {
-		return err
-	}
-
-	if err := o.ClusterResources.ClusterCatalogGenerator(copiedSchema.AllImages); err != nil {
-		return err
-	}
-
-	// generate signature config map
-	if err := o.ClusterResources.GenerateSignatureConfigMap(copiedSchema.AllImages); err != nil {
-		// as this is not a seriously fatal error we just log the error
-		o.Log.Warn("%s", err)
-	}
-
-	// create updateService
-	if o.Config.Mirror.Platform.Graph {
-		graphImage, err := o.Release.GraphImage()
-		if err != nil {
-			return err
-		}
-		releaseImage, err := o.Release.ReleaseImage(cmd.Context())
-		if err != nil {
-			return err
-		}
-		if err := o.ClusterResources.UpdateServiceGenerator(graphImage, releaseImage); err != nil {
-			return err
-		}
 	}
 
 	return batchError
@@ -990,6 +1048,12 @@ func (o *ExecutorSchema) RunDiskToMirror(cmd *cobra.Command, args []string) erro
 	if err := o.MirrorUnArchiver.Unarchive(); err != nil {
 		o.Log.Error(" %v ", err)
 		return err
+	}
+
+	if warning := version.CheckVersionMetadata(o.Opts.Global.WorkingDir, version.Get()); warning != "" {
+		o.Log.Warn(emoji.Warning+"  %s", warning)
+	} else {
+		o.Log.Debug("version metadata check passed: %s", version.Get().GitVersion)
 	}
 
 	// start the local storage registry
@@ -1025,43 +1089,80 @@ func (o *ExecutorSchema) RunDiskToMirror(cmd *cobra.Command, args []string) erro
 	// NOTE: we will check for batch errors at the end
 	copiedSchema, batchError := o.Batch.Worker(cmd.Context(), collectorSchema, *o.Opts)
 
-	// create IDMS/ITMS
-	forceRepositoryScope := o.Opts.Global.MaxNestedPaths > 0
-	if err := o.ClusterResources.IDMS_ITMSGenerator(copiedSchema.AllImages, forceRepositoryScope); err != nil {
+	if err := o.generateClusterResources(cmd.Context(), copiedSchema.AllImages); err != nil {
 		return err
-	}
-
-	// create catalog source
-	if err := o.ClusterResources.CatalogSourceGenerator(copiedSchema.AllImages); err != nil {
-		return err
-	}
-
-	if err := o.ClusterResources.ClusterCatalogGenerator(copiedSchema.AllImages); err != nil {
-		return err
-	}
-
-	// generate signature config map
-	if err := o.ClusterResources.GenerateSignatureConfigMap(copiedSchema.AllImages); err != nil {
-		// as this is not a seriously fatal error we just log the error
-		o.Log.Warn("%s", err)
-	}
-
-	// create updateService
-	if o.Config.Mirror.Platform.Graph {
-		graphImage, err := o.Release.GraphImage()
-		if err != nil {
-			return err
-		}
-		releaseImage, err := o.Release.ReleaseImage(cmd.Context())
-		if err != nil {
-			return err
-		}
-		if err := o.ClusterResources.UpdateServiceGenerator(graphImage, releaseImage); err != nil {
-			return err
-		}
 	}
 
 	return batchError
+}
+
+// generateClusterResources generates the following cluster resources:
+// IDMS/ITMS, CatalogSource, ClusterCatalog, UpdateService and SignatureConfigMap.
+func (o *ExecutorSchema) generateClusterResources(ctx context.Context, images []v2alpha1.CopyImageSchema) error {
+	if o.ClusterResources == nil {
+		return fmt.Errorf("cluster resources generator is not initialized")
+	}
+	o.Log.Info(emoji.PageFacingUp + " Generating cluster resources...")
+
+	if err := o.generateImageMirrorSet(images); err != nil {
+		return err
+	}
+
+	if err := o.generateCatalogResources(images); err != nil {
+		return err
+	}
+
+	if err := o.ClusterResources.GenerateSignatureConfigMap(images); err != nil {
+		o.Log.Warn("Failed to generate signature ConfigMap: %v", err)
+	}
+
+	if err := o.generateUpdateServiceResource(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// generateImageMirrorSet generates IDMS/ITMS resources
+func (o *ExecutorSchema) generateImageMirrorSet(images []v2alpha1.CopyImageSchema) error {
+	forceRepositoryScope := o.Opts.Global.MaxNestedPaths > 0
+	if err := o.ClusterResources.IDMS_ITMSGenerator(images, forceRepositoryScope); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *ExecutorSchema) generateCatalogResources(images []v2alpha1.CopyImageSchema) error {
+	if err := o.ClusterResources.CatalogSourceGenerator(images); err != nil {
+		return err
+	}
+
+	if err := o.ClusterResources.ClusterCatalogGenerator(images); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *ExecutorSchema) generateUpdateServiceResource(ctx context.Context) error {
+	if !o.Config.Mirror.Platform.Graph {
+		return nil
+	}
+
+	graphImage, err := o.Release.GraphImage()
+	if err != nil {
+		return err
+	}
+
+	releaseImage, err := o.Release.ReleaseImage(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := o.ClusterResources.UpdateServiceGenerator(graphImage, releaseImage); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // setupLogsLevelAndDir - private utility to setup log
@@ -1365,12 +1466,12 @@ func removeDuplicatedImages(allRelatedImages []v2alpha1.CopyImageSchema, mode st
 }
 
 // createConfigsWithPinnedCatalogs generates and writes pinned ISC and DISC configurations.
-func (o *ExecutorSchema) createConfigsWithPinnedCatalogs(collectorSchema v2alpha1.CollectorSchema) {
+// Catalogs are already pinned by pinOperatorCatalogs() at workflow start for M2D/M2M modes.
+func (o *ExecutorSchema) createConfigsWithPinnedCatalogs() {
 	o.Log.Info("Generating pinned configurations...")
-	iscPath, discPath, err := config.PinAndWriteISCAndDSC(
+	iscPath, discPath, err := config.WriteISCAndDSC(
 		o.Config,
-		collectorSchema.CatalogToFBCMap,
-		o.Opts.Global.WorkingDir,
+		o.Opts,
 		o.Log,
 	)
 	if err != nil {

@@ -61,6 +61,15 @@ type GlobalOptions struct {
 	CacheDir               string        // Path to the cache directory
 	IsTerminal             bool          // Whether we're running in a terminal console or not
 	IgnoreReleaseSignature bool          // Ignore release signatures, used primarily for qe testing unpublished signatures
+	S3Bucket               string        // S3 bucket name for cache storage (enables S3 backend)
+	S3Region               string        // AWS region for the S3 bucket
+	S3AccessKey            string        // S3 access key ID
+	S3SecretKey            string        // S3 secret access key
+	S3Endpoint             string        // Custom S3 endpoint URL (for non-AWS S3 like MinIO)
+}
+
+func (o *GlobalOptions) IsS3Storage() bool {
+	return o.S3Bucket != ""
 }
 
 type CopyOptions struct {
@@ -85,6 +94,7 @@ type CopyOptions struct {
 	DecryptionKeys           []string  // Keys needed to decrypt the image
 	Mode                     string    // possible values: mirrorToDisk, disktoMirror or mirrorToMirror
 	IsDryRun                 bool      // generates a mappings.txt without performing the mirroring
+	IsDryRunManifestLists    bool      // dry run that also inspects manifest lists and includes sub-digests
 	Dev                      bool      // developer mode - will be removed when completed
 	Destination              string    // what to target to
 	UUID                     uuid.UUID // set uuid
